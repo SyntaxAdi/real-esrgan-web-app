@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# Pinned stack (keeps torchvision.functional_tensor available)
+# Pinned stack 
 RUN pip install --upgrade pip "numpy<2" && \
     pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu116 \
         torch==1.12.1+cu116 torchvision==0.13.1+cu116 torchaudio==0.12.1+cu116 && \

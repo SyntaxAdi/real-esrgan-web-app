@@ -25,14 +25,13 @@ from realesrgan import RealESRGANer
 from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 from basicsr.archs.rrdbnet_arch import RRDBNet
 
-
-st.set_page_config(page_title="Real-ESRGAN Upscaler", layout="wide")
+st.image("Real-ESRGAN/assets/realesrgan_logo.png", width=320)
 # Increase upload limit to 1 GB
 try:
     st.set_option("server.maxUploadSize", 1024)
 except Exception:
     pass
-st.title("Real-ESRGAN — Image/Video Upscaler")
+
 
 # Speed: let cuDNN autotune pick fastest algorithms for stable sizes
 try:

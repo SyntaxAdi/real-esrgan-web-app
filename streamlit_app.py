@@ -16,7 +16,6 @@ try:
 except Exception:
     tqdm = None
 
-# Always use the full repo (PyPI realesrgan is too minimal)
 import sys, os
 repo_root = "/workspace/Real-ESRGAN"
 if os.path.isdir(os.path.join(repo_root, "realesrgan")):
@@ -42,7 +41,7 @@ try:
 except Exception:
     pass
 
-# --- Session state for cooperative cancellation ---
+# --- Session state  ---
 def _init_state():
     ss = st.session_state
     ss.setdefault("run_token", None)         # unique token per run
@@ -475,15 +474,6 @@ if input_type == "Video" and uploaded_video and start and not st.session_state.w
                     args += ["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0?", "-c:a", "copy"]
                 return args
 
-            def encode_with_nvenc():
-                args = base_encode_args() + [
-                    "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p",
-                    "-preset", "fast",
-                    "-b:v", "0", "-cq", str(crf),
-                    str(video_out)
-                ]
-                run_ffmpeg(args)
-
             def encode_with_libx264():
                 args = base_encode_args() + [
                     "-c:v", "libx264", "-pix_fmt", "yuv420p",
@@ -492,15 +482,8 @@ if input_type == "Video" and uploaded_video and start and not st.session_state.w
                 ]
                 run_ffmpeg(args)
 
-            # Prefer NVENC if present; otherwise CPU
-            if ffmpeg_has_nvenc():
-                try:
-                    encode_with_nvenc()
-                except RuntimeError:
-                    st.info("NVENC failed; falling back to CPU (libx264) encoder.")
-                    encode_with_libx264()
-            else:
-                encode_with_libx264()
+            
+            encode_with_libx264()
 
             st.success("Done!")
             st.video(str(video_out))

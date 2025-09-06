@@ -5,6 +5,10 @@
 </p>
 A lightweight Streamlit UI around Real-ESRGAN for upscaling videos and images. It supports GPU inference, adjustable tiling, FP16, denoise control for the general v3 model, multi-image batch processing, and robust video encoding.
 
+<p align="center">
+  <img src="demo.gif" alt="Real-ESRGAN"/>
+</p>
+
 ## Features
 - Image and video upscaling with Real-ESRGAN
 - Models: `realesrgan-x4plus`, `realesrnet-x4plus`, `realesr-general-x4v3` (with denoise)

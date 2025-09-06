@@ -282,7 +282,6 @@ def torch_cuda_available() -> bool:
         return False
 
 def enhance_image(upsampler: RealESRGANer, img: Image.Image, outscale: int) -> Image.Image:
-    import cv2
     img_np = np.array(img)[:, :, ::-1]  # RGB->BGR
     output, _ = upsampler.enhance(img_np, outscale=outscale)  # BGR
     out_rgb = output[:, :, ::-1]

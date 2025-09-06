@@ -1,0 +1,24 @@
+version: "3.8"
+services:
+  realesrgan_app:
+    build: .
+    container_name: realesrgan_video_app
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/workspace
+    environment:
+      PYTHONPATH: "/workspace/Real-ESRGAN:${PYTHONPATH}"
+    runtime: nvidia
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    command: >
+      bash -lc "
+        # DO NOT install PyPI realesrgan here;
+        # start Streamlit directly, using the repo on PYTHONPATH
+        streamlit run /workspace/streamlit_app.py --server.port=8501 --server.address=0.0.0.0
+      "

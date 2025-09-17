@@ -17,7 +17,7 @@ except Exception:
     tqdm = None
 
 import sys, os
-repo_root = "/workspace/Real-ESRGAN"
+repo_root = "Real-ESRGAN"
 if os.path.isdir(os.path.join(repo_root, "realesrgan")):
     sys.path.insert(0, repo_root)
 
@@ -34,11 +34,6 @@ except Exception:
 
 
 # Speed: let cuDNN autotune pick fastest algorithms for stable sizes
-try:
-    import torch
-    torch.backends.cudnn.benchmark = True
-except Exception:
-    pass
 
 # --- Session state  ---
 def _init_state():
@@ -269,7 +264,7 @@ def build_model(model_name: str, scale: int, tile: int, tile_pad: int, fp16: boo
         tile=tile,
         tile_pad=tile_pad,
         pre_pad=0,
-        half=fp16 and (torch_cuda_available()),
+        half=False,
     )
     upsampler.model.name = model_name  # for logging
     return upsampler, outscale
@@ -301,7 +296,7 @@ with st.sidebar:
     # Balanced default for responsiveness (cancel between tiles)
     tile = st.slider("Tile size (0 = no tiling)", 0, 512, 256, step=64)
     tile_pad = st.slider("Tile padding", 0, 64, 8, step=4)
-    fp16 = st.checkbox("Use FP16 (half precision)", True)
+    fp16 = st.checkbox("Use FP16 (half precision)", False)
 
     # Denoise strength for general-x4v3 (0=more denoise, 1=less denoise)
     denoise_strength = None
@@ -405,7 +400,7 @@ if input_type == "Video" and uploaded_video and start and not st.session_state.w
 
             st.info("Extracting frames…")
             run_ffmpeg([
-                "ffmpeg", "-y", "-hwaccel", "cuda", "-i", str(in_path), "-vsync", "0",
+                "ffmpeg", "-y", "-i", str(in_path), "-vsync", "0",
                 "-q:v", "2", str(in_frames / "f_%06d.jpg")
             ])
 

@@ -1,0 +1,5 @@
+ffmpeg
+git
+wget
+curl
+build-essential

@@ -368,13 +368,13 @@ if input_type == "Video" and uploaded_video and start and not st.session_state.w
 
     try:
         # Persistent output workspace under /workspace/output
-        output_root = Path("/workspace/output")
+        output_root = Path(tempfile.gettempdir()) / "real-esrgan-output"
         output_root.mkdir(parents=True, exist_ok=True)
         run_dir = output_root / f"run_{run_token}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         # Prefer existing /workspace/data/models; else use /workspace/output/models
-        data_models = Path("/workspace/data/models")
+        data_models = Path(tempfile.gettempdir()) / "real-esrgan-data" / "models"
         weights_dir = data_models if data_models.exists() else (output_root / "models")
         weights_dir.mkdir(parents=True, exist_ok=True)
 
@@ -504,13 +504,13 @@ elif input_type == "Image" and uploaded_image and start and not st.session_state
 
     try:
         # Persistent output workspace under /workspace/output
-        output_root = Path("/workspace/output")
+        output_root = Path(tempfile.gettempdir()) / "real-esrgan-output"
         output_root.mkdir(parents=True, exist_ok=True)
         run_dir = output_root / f"run_{run_token}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         # Prefer existing /workspace/data/models; else use /workspace/output/models
-        data_models = Path("/workspace/data/models")
+        data_models = Path(tempfile.gettempdir()) / "real-esrgan-data" / "models"
         weights_dir = data_models if data_models.exists() else (output_root / "models")
         weights_dir.mkdir(parents=True, exist_ok=True)
 

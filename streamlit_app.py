@@ -18,7 +18,7 @@ except Exception:
 
 import sys, os
 repo_root = "Real-ESRGAN"
-if os.path.isdir(os.path.join(repo_root, "realesrgan")):
+if 'realesrgan' not in sys.modules and os.path.isdir(os.path.join(repo_root, "realesrgan")):
     sys.path.insert(0, repo_root)
 
 from realesrgan import RealESRGANer

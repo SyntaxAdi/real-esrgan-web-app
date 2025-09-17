@@ -6,6 +6,10 @@ import shutil
 import tempfile
 import subprocess
 from pathlib import Path
+from telethon import TelegramClient
+from process_queue import ProcessQueue, Job
+import asyncio
+from FastTelethonhelper import fast_upload
 
 import numpy as np
 from PIL import Image
@@ -33,8 +37,6 @@ except Exception:
     pass
 
 
-# Speed: let cuDNN autotune pick fastest algorithms for stable sizes
-
 # --- Session state  ---
 def _init_state():
     ss = st.session_state
@@ -43,6 +45,7 @@ def _init_state():
     ss.setdefault("worker_running", False)   # is a job active?
     ss.setdefault("last_config_hash", None)  # detect settings change
     ss.setdefault("ffmpeg_proc", None)       # handle to kill ffmpeg if needed
+    ss.setdefault("process_queue", ProcessQueue())
 
 _init_state()
 
@@ -311,16 +314,25 @@ with st.sidebar:
     crf = st.slider("CRF (lower = higher quality, larger file)", 14, 28, 18) if input_type == "Video" else 18
 
 # Uploaders by type
-uploaded_video = None
-uploaded_image = None
-if 'input_type' in locals() and input_type == "Video":
-    uploaded_video = st.file_uploader("Upload a video", type=["mp4", "mov", "mkv", "webm"])
-else:
-    uploaded_image = st.file_uploader(
-        "Upload image(s)",
-        type=["png", "jpg", "jpeg", "webp", "bmp", "tiff"],
-        accept_multiple_files=True,
-    )
+uploaded_files = None
+if 'input_type' in locals():
+    if input_type == "Video":
+        uploaded_files = st.file_uploader(
+            "Upload video(s)",
+            type=["mp4", "mov", "mkv", "webm"],
+            accept_multiple_files=True
+        )
+    else:
+        uploaded_files = st.file_uploader(
+            "Upload image(s)",
+            type=["png", "jpg", "jpeg", "webp", "bmp", "tiff"],
+            accept_multiple_files=True,
+        )
+
+# Telegram settings
+st.header("Telegram Notifications")
+user_id = st.text_input("Your Telegram User ID")
+
 
 start = st.button("Start upscaling")
 
@@ -330,242 +342,156 @@ with st.sidebar:
 
 if stop_clicked:
     cancel_current_run()
-    st.rerun() 
+    st.rerun()
     st.warning("Stopping current run…")
-
-# Compute a hash of current settings + file name to auto-cancel on change
-current_cfg = {
-    "model_name": model_name,
-    "upscale": upscale,
-    "tile": tile,
-    "tile_pad": tile_pad,
-    "fp16": fp16,
-    "denoise_strength": denoise_strength,
-    "input_type": input_type,
-    "keep_audio": keep_audio,
-    "crf": crf,
-    "filename": (
-        uploaded_video.name if uploaded_video else (
-            [f.name for f in uploaded_image] if uploaded_image else None
-        )
-    ),
-}
-cfg_hash = config_hash(**current_cfg)
-
-# Auto-cancel if settings changed mid-run
-if st.session_state.worker_running and st.session_state.last_config_hash and st.session_state.last_config_hash != cfg_hash:
-    cancel_current_run()
 
 # --------------------------
 # Main flow
 # --------------------------
-if input_type == "Video" and uploaded_video and start and not st.session_state.worker_running:
-    # Mark job as active
-    st.session_state.worker_running = True
-    st.session_state.cancel = False
-    st.session_state.last_config_hash = cfg_hash
-    run_token = new_run_token()
+async def send_telegram_message(token, chat_id, text):
+    """Sends a message via a Telegram bot."""
+    from config import API_ID, API_HASH
+    if not token or not chat_id:
+        return
+    try:
+        client = TelegramClient('bot_session', API_ID, API_HASH)
+        await client.start(bot_token=token)
+        async with client:
+            await client.send_message(entity=int(chat_id), message=text)
+    except Exception as e:
+        print(f"Failed to send Telegram message: {e}")
+
+async def send_telegram_file(token, chat_id, file_path, caption=""):
+    """Sends a file via a Telegram bot using FastTelethonhelper."""
+    from config import API_ID, API_HASH
+    if not token or not chat_id:
+        return
+    try:
+        client = TelegramClient('bot_session', API_ID, API_HASH)
+        await client.start(bot_token=token)
+        async with client:
+            file = await fast_upload(client, str(file_path))
+            await client.send_file(entity=int(chat_id), file=file, caption=caption, force_document=True)
+    except Exception as e:
+        print(f"Failed to send Telegram file: {e}")
+
+def background_task(job_id, files_data, input_type, model_name, upscale, tile, tile_pad, fp16, denoise_strength, keep_audio, crf, bot_token, user_id):
+    """The actual processing logic that runs in a separate process."""
+    output_root = Path(tempfile.gettempdir()) / "real-esrgan-output"
+    output_root.mkdir(parents=True, exist_ok=True)
+    run_dir = output_root / f"run_{job_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    data_models = Path(tempfile.gettempdir()) / "real-esrgan-data" / "models"
+    weights_dir = data_models if data_models.exists() else (output_root / "models")
+    weights_dir.mkdir(parents=True, exist_ok=True)
+
+    out_paths = []
 
     try:
-        # Persistent output workspace under /workspace/output
-        output_root = Path(tempfile.gettempdir()) / "real-esrgan-output"
-        output_root.mkdir(parents=True, exist_ok=True)
-        run_dir = output_root / f"run_{run_token}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Prefer existing /workspace/data/models; else use /workspace/output/models
-        data_models = Path(tempfile.gettempdir()) / "real-esrgan-data" / "models"
-        weights_dir = data_models if data_models.exists() else (output_root / "models")
-        weights_dir.mkdir(parents=True, exist_ok=True)
-
-        in_path = run_dir / uploaded_video.name
-        with open(in_path, "wb") as f:
-            f.write(uploaded_video.read())
-
-            # Before long ops, re-check token/cancel
-            if st.session_state.cancel or st.session_state.run_token != run_token:
-                raise RuntimeError("Cancelled")
-
-            # Probe
-            fps_frac = ffprobe_value(str(in_path), "v:0", "stream=r_frame_rate", "30/1")
-            fps = parse_fraction(fps_frac, 30.0)
-            has_audio = bool(ffprobe_value(str(in_path), "a", "stream=index", ""))
-            st.write(f"Detected **FPS**: `{fps_frac}` ({fps:.3f})  |  **Audio**: {'Yes' if has_audio else 'No'}")
-
-            # Extract frames
-            in_frames = run_dir / "frames_in"
-            out_frames = run_dir / "frames_out"
-            in_frames.mkdir(parents=True, exist_ok=True)
-            out_frames.mkdir(parents=True, exist_ok=True)
-
-            st.info("Extracting frames…")
-            run_ffmpeg([
-                "ffmpeg", "-y", "-i", str(in_path), "-vsync", "0",
-                "-q:v", "2", str(in_frames / "f_%06d.jpg")
-            ])
-
-            if st.session_state.cancel or st.session_state.run_token != run_token:
-                raise RuntimeError("Cancelled")
-
-            audio_path = run_dir / "audio.m4a"
-            if keep_audio and has_audio:
-                run_ffmpeg(["ffmpeg", "-y", "-i", str(in_path), "-vn", "-acodec", "copy", str(audio_path)])
-
-            # Load upsampler
-            upsampler, outscale = build_model(model_name, upscale, tile, tile_pad, fp16, weights_dir, denoise_strength)
-
-            # Process frames with live progress
-            # Read JPEG frames (faster than PNG). Also include PNG for compatibility.
-            frames = sorted(list(in_frames.glob("*.jpg")) + list(in_frames.glob("*.png")))
-            n = len(frames)
-            st.write(f"Processing **{n}** frames…")
-            prog = st.progress(0)
-            status = st.empty()
-
-            iterator = frames if tqdm is None else tqdm(frames, desc="Upscaling frames", unit="frame")
-
-            preview_before = st.empty()
-            preview_after = st.empty()
-
-            for i, fpath in enumerate(iterator, start=1):
-                # Cooperative cancellation: token mismatch or cancel flag
-                if st.session_state.cancel or st.session_state.run_token != run_token:
-                    raise RuntimeError("Cancelled")
-
-                img = Image.open(fpath).convert("RGB")
-                try:
-                    sr = enhance_image(upsampler, img, outscale=upscale)
-                except RuntimeError as e:
-                    # If OOM or other runtime issues, you can add auto-retry with smaller tiles here
-                    raise
-
-                sr.save(out_frames / fpath.name)
-                status.write(f"Upscaled frame {i}/{n}")
-                prog.progress(i / n)
-                preview_before.image(img, caption=f"Original frame {i}", use_container_width=True)
-                preview_after.image(sr, caption=f"Upscaled frame {i}", use_container_width=True)
-
-            if st.session_state.cancel or st.session_state.run_token != run_token:
-                raise RuntimeError("Cancelled")
-
-            # Encode back to video
-            st.info("Encoding final video…")
-            video_out = output_root / f"sr_{in_path.stem}.mp4"
-
-            # Determine frame pattern extension (prefer JPG)
-            frame_ext = ".jpg" if any(out_frames.glob("*.jpg")) else ".png"
-            frame_pattern = str(out_frames / f"f_%06d{frame_ext}")
-
-            def base_encode_args():
-                args = [
-                    "ffmpeg", "-y",
-                    "-framerate", f"{fps:.6f}",
-                    "-start_number", "1",
-                    "-i", frame_pattern,
-                ]
-                if keep_audio and has_audio and audio_path.exists():
-                    args += ["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0?", "-c:a", "copy"]
-                return args
-
-            def encode_with_libx264():
-                args = base_encode_args() + [
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                    "-preset", "medium", "-crf", str(crf),
-                    str(video_out)
-                ]
-                run_ffmpeg(args)
-
-            
-            encode_with_libx264()
-
-            st.success("Done!")
-            st.video(str(video_out))
-            with open(video_out, "rb") as f:
-                st.download_button("Download upscaled video", f, file_name=video_out.name)
-
-    except RuntimeError as e:
-        if "Cancelled" in str(e):
-            st.warning("Run cancelled.")
-        else:
-            st.error(str(e))
-    finally:
-        st.session_state.worker_running = False
-        st.session_state.cancel = False
-        st.session_state.ffmpeg_proc = None
-
-# --------------------------
-# Image flow
-# --------------------------
-elif input_type == "Image" and uploaded_image and start and not st.session_state.worker_running:
-    st.session_state.worker_running = True
-    st.session_state.cancel = False
-    st.session_state.last_config_hash = cfg_hash
-    run_token = new_run_token()
-
-    try:
-        # Persistent output workspace under /workspace/output
-        output_root = Path(tempfile.gettempdir()) / "real-esrgan-output"
-        output_root.mkdir(parents=True, exist_ok=True)
-        run_dir = output_root / f"run_{run_token}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Prefer existing /workspace/data/models; else use /workspace/output/models
-        data_models = Path(tempfile.gettempdir()) / "real-esrgan-data" / "models"
-        weights_dir = data_models if data_models.exists() else (output_root / "models")
-        weights_dir.mkdir(parents=True, exist_ok=True)
-
-        # Load upsampler once
         upsampler, outscale = build_model(model_name, upscale, tile, tile_pad, fp16, weights_dir, denoise_strength)
 
-        files = uploaded_image  # list of UploadedFile
-        n = len(files)
-        st.write(f"Processing {n} image(s)…")
-        prog = st.progress(0)
-        status = st.empty()
-        preview_before = st.empty()
-        preview_after = st.empty()
-
-        out_paths = []
-
-        for i, uf in enumerate(files, start=1):
-            if st.session_state.cancel or st.session_state.run_token != run_token:
-                raise RuntimeError("Cancelled")
-
-            in_path = run_dir / uf.name
+        for i, file_data in enumerate(files_data, start=1):
+            file_name = file_data['name']
+            file_bytes = file_data['bytes']
+            
+            in_path = run_dir / file_name
             with open(in_path, "wb") as f:
-                f.write(uf.read())
+                f.write(file_bytes)
 
-            img = Image.open(in_path).convert("RGB")
+            if input_type == "Image":
+                img = Image.open(in_path).convert("RGB")
+                sr = enhance_image(upsampler, img, outscale=upscale)
+                img_out = output_root / f"sr_{in_path.stem}.png"
+                sr.save(img_out)
+                out_paths.append(img_out)
 
-            sr = enhance_image(upsampler, img, outscale=upscale)
+            elif input_type == "Video":
+                # Simplified video processing for background task
+                fps_frac = ffprobe_value(str(in_path), "v:0", "stream=r_frame_rate", "30/1")
+                fps = parse_fraction(fps_frac, 30.0)
+                has_audio = bool(ffprobe_value(str(in_path), "a", "stream=index", ""))
+                
+                in_frames = run_dir / "frames_in"
+                out_frames = run_dir / "frames_out"
+                in_frames.mkdir(parents=True, exist_ok=True)
+                out_frames.mkdir(parents=True, exist_ok=True)
+                
+                subprocess.run(["ffmpeg", "-y", "-i", str(in_path), "-vsync", "0", "-q:v", "2", str(in_frames / "f_%06d.jpg")])
+                
+                audio_path = run_dir / "audio.m4a"
+                if keep_audio and has_audio:
+                    subprocess.run(["ffmpeg", "-y", "-i", str(in_path), "-vn", "-acodec", "copy", str(audio_path)])
 
-            img_out = output_root / f"sr_{in_path.stem}.png"
-            sr.save(img_out)
-            out_paths.append(img_out)
+                frames = sorted(list(in_frames.glob("*.jpg")) + list(in_frames.glob("*.png")))
+                for fpath in frames:
+                    img = Image.open(fpath).convert("RGB")
+                    sr = enhance_image(upsampler, img, outscale=upscale)
+                    sr.save(out_frames / fpath.name)
+                
+                video_out = output_root / f"sr_{in_path.stem}.mp4"
+                frame_ext = ".jpg" if any(out_frames.glob("*.jpg")) else ".png"
+                frame_pattern = str(out_frames / f"f_%06d{frame_ext}")
 
-            status.write(f"Upscaled {i}/{n}: {uf.name}")
-            prog.progress(i / n)
-            # Show rolling preview of last processed image
-            preview_before.image(img, caption=f"Original — {uf.name}", use_container_width=True)
-            preview_after.image(sr, caption=f"Upscaled — {img_out.name}", use_container_width=True)
+                def base_encode_args():
+                    args = ["ffmpeg", "-y", "-framerate", f"{fps:.6f}", "-start_number", "1", "-i", frame_pattern]
+                    if keep_audio and has_audio and audio_path.exists():
+                        args += ["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0?", "-c:a", "copy"]
+                    return args
 
-        # Package results as a zip for easy download
-        import zipfile
-        zip_out = output_root / f"sr_images_{run_token}.zip"
-        with zipfile.ZipFile(zip_out, 'w', compression=zipfile.ZIP_STORED) as zf:
-            for p in out_paths:
-                zf.write(p, arcname=p.name)
+                args = base_encode_args() + ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", str(crf), str(video_out)]
+                subprocess.run(args)
+                out_paths.append(video_out)
 
-        st.success("Done!")
-        with open(zip_out, "rb") as f:
-            st.download_button("Download all upscaled images (ZIP)", f, file_name=zip_out.name)
+        if out_paths:
+            if len(out_paths) > 1:
+                zip_out = output_root / f"sr_files_{job_id}.zip"
+                import zipfile
+                with zipfile.ZipFile(zip_out, 'w', compression=zipfile.ZIP_STORED) as zf:
+                    for p in out_paths:
+                        zf.write(p, arcname=p.name)
+                final_path = zip_out
+                caption = "Your upscaled files are ready!"
+            else:
+                final_path = out_paths[0]
+                caption = "Your upscaled file is ready!"
 
-    except RuntimeError as e:
-        if "Cancelled" in str(e):
-            st.warning("Run cancelled.")
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(send_telegram_message(bot_token, user_id, "Upscaling complete!"))
+            loop.run_until_complete(send_telegram_file(bot_token, user_id, final_path, caption))
+            st.session_state.process_queue.update_job_status(job_id, "completed")
         else:
-            st.error(str(e))
-    finally:
-        st.session_state.worker_running = False
-        st.session_state.cancel = False
-        st.session_state.ffmpeg_proc = None
+            st.session_state.process_queue.update_job_status(job_id, "failed")
+
+    except Exception as e:
+        print(f"Error in background task {job_id}: {e}")
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(send_telegram_message(bot_token, user_id, f"An error occurred during upscaling: {e}"))
+        st.session_state.process_queue.update_job_status(job_id, "failed")
+
+
+if uploaded_files and start:
+    files_data = [{'name': f.name, 'bytes': f.read()} for f in uploaded_files]
+    
+    from config import BOT_TOKEN, API_ID, API_HASH
+
+    if not all([BOT_TOKEN, API_ID, API_HASH]):
+        st.error("BOT_TOKEN, API_ID, and API_HASH must be set in your .env file. Please add them to continue.")
+    else:
+        job = st.session_state.process_queue.add_job(
+            target=background_task,
+            args=(
+                files_data, input_type, model_name, upscale, tile, tile_pad,
+                fp16, denoise_strength, keep_audio, crf, BOT_TOKEN, user_id
+            )
+        )
+        st.success(f"Started background job: {job.id}")
+        st.info("You can now close this tab. You will receive a notification on Telegram when the process is complete.")
+
+# Display job statuses
+st.session_state.process_queue.cleanup()
+jobs = st.session_state.process_queue.jobs
+if jobs:
+    st.header("Job Status")
+    for job_id, job in jobs.items():
+        st.text(f"Job {job.id[:8]}...: {job.status}")

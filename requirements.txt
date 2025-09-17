@@ -9,3 +9,6 @@ torchvision==0.16.0
 tqdm
 pyyaml
 streamlit
+telethon
+python-dotenv
+FastTelethonhelper
